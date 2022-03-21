@@ -8,6 +8,7 @@ library(ranger)
 library(gbm)
 library(ROCR)
 library(magrittr)
+library(glmnet)
 
 # set a reproducible seed
 set.seed(10)
@@ -16,7 +17,7 @@ set.seed(10)
 
 # Set which outcome you're interested in
 # pick one of "seasonal_vaccine" or "h1n1_vaccine"
-outcome <- "seasonal_vaccine"
+outcome_name <- "seasonal_vaccine"
 
 # DATA READING AND CLEANING ------------------------
 
@@ -33,7 +34,7 @@ dat[, respondent_id := NULL]
 
 # Create outcome variable and delete the other one
 # so we don't accidentally use it
-dat[, outcome := get(outcome)]
+dat[, outcome := get(outcome_name)]
 dat[, seasonal_vaccine := NULL]
 dat[, h1n1_vaccine := NULL]
 
@@ -129,6 +130,9 @@ preds.best <- predict(tree.best, dat.test)[, 2]
 make.plots(preds.1se, main="Min. Complexity Tree")
 make.plots(preds.best, main="Best Tree")
 
+get.misclass.error(preds.1se)
+get.misclass.error(preds.best)
+
 # (2) RANDOM FOREST
 # --------------------------
 fit.ranger <- ranger(as.factor(outcome) ~ .,
@@ -138,10 +142,54 @@ fit.ranger <- ranger(as.factor(outcome) ~ .,
 
 preds.ranger <- predict(fit.ranger, dat.test)$predictions[, 2]
 
-par(mfrow=c(1, 2))
 make.plots(preds.ranger, main="Random Forest")
 
-# (3) BOOSTING
+get.misclass.error(preds.ranger)
+
+# (3) LASSO
+# ---------
+
+# Create covariates matrix (without intercept) and outcome vector
+x.train <- model.matrix(outcome ~ 0 + ., data=dat.train)
+x.test <- model.matrix(outcome ~ 0 + ., data=dat.test)
+
+y.train <- c(dat.train[, "outcome"])[[1]] %>% as.factor()
+y.test <- c(dat.test[, "outcome"])[[1]] %>% as.factor()
+
+# Fit a lasso model (alpha = 1 [alpha = 0 corresponds to ridge regression])
+fit.lasso <- glmnet(x=x.train, y=y.train,
+                    family="binomial", alpha=1)
+
+# Create a coefficient plot
+plot(fit.lasso)
+
+# Perform cross-validation to see what the best lambda was
+# and plot mean squared error
+cv.lasso <- cv.glmnet(x=x.train, y=as.numeric(y.train),
+                      alpha=1, nfolds=10, type.measure="deviance")
+plot(cv.lasso)
+
+# Get the best lambda, and see the values for the coefficients
+# plus which ones were dropped out of the model (denoted with ".")
+lambda.min <- cv.lasso$lambda.min
+predict(fit.lasso, type="coefficients", s=lambda.min)
+
+# Compare to a larger lambda within 1 SE,
+# this is a sparser model
+lambda.1se <- cv.lasso$lambda.1se
+predict(fit.lasso, type="coefficients", s=lambda.1se)
+
+# Get predictions with both of the lambda values
+preds.lasso.best <- predict(fit.lasso, newx=x.test, type="response", s=lambda.min)
+preds.lasso.1se <- predict(fit.lasso, newx=x.test, type="response", s=lambda.1se)
+
+make.plots(preds.lasso.best, main="Best Lambda")
+make.plots(preds.lasso.1se, main="Sparser Model")
+
+get.misclass.error(preds.lasso.best)
+get.misclass.error(preds.lasso.1se)
+
+# (4) BOOSTING
 # ------------
 
 fit.gbm.1 <- gbm(outcome ~ .,
